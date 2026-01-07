@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Treasure Hunter</title>
+    <script src="https://yandex.ru/games/sdk/v2"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: Arial, sans-serif; overflow: hidden; background: #1a1a2e; }
+        #game { width: 100vw; height: 100vh; position: relative; background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); }
+        #menu, #gameOver, #pause { position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: flex; flex-direction: column; justify-content: center; align-items: center; background: rgba(26, 26, 46, 0.95); z-index: 10; }
+        .hidden { display: none !important; }
+        .btn { padding: 15px 40px; margin: 10px; font-size: 18px; background: #0f3460; color: #e94560; border: 2px solid #e94560; border-radius: 8px; cursor: pointer; transition: all 0.3s; }
+        .btn:hover { background: #e94560; color: #fff; transform: scale(1.05); }
+        h1 { font-size: 48px; color: #e94560; margin-bottom: 30px; text-shadow: 0 0 10px #e94560; }
+        h2 { font-size: 32px; color: #fff; margin: 20px; }
+        #gameArea { width: 100%; height: 100%; position: relative; }
+        .character { position: absolute; font-size: 40px; transition: all 0.1s linear; }
+        .item { position: absolute; font-size: 30px; animation: pulse 1s infinite; }
+        .obstacle { position: absolute; font-size: 35px; animation: burn 0.5s infinite; }
+        @keyframes pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.2); } }
+        @keyframes burn { 0%, 100% { filter: brightness(1); } 50% { filter: brightness(1.5); } }
+        #hud { position: absolute; top: 20px; left: 20px; color: #fff; font-size: 20px; z-index: 5; background: rgba(0,0,0,0.5); padding: 15px; border-radius: 10px; }
+        #score, #timer, #lives { margin: 5px 0; }
+        .leaderboard { max-height: 300px; overflow-y: auto; background: rgba(0,0,0,0.3); padding: 20px; border-radius: 10px; margin: 20px; }
+        .lb-entry { color: #fff; padding: 5px; margin: 3px 0; }
+    </style>
+</head>
+<body>
+    <div id="game">
+        <div id="menu">
+            <h1>👾 TREASURE HUNTER 💎</h1>
+            <button class="btn" onclick="startGame('classic')">Классический режим</button>
+            <button class="btn" onclick="startGame('endless')">Бесконечный режим</button>
+            <div id="leaderboardMenu" class="leaderboard"></div>
+        </div>
+        
+        <div id="gameArea" class="hidden">
+            <div id="hud">
+                <div id="score">Очки: 0</div>
+                <div id="timer"></div>
+                <div id="lives"></div>
+            </div>
+        </div>
+        
+        <div id="pause" class="hidden">
+            <h2>⏸️ ПАУЗА</h2>
+            <button class="btn" onclick="resumeGame()">Продолжить</button>
+            <button class="btn" onclick="exitToMenu()">Выход в меню</button>
+        </div>
+        
+        <div id="gameOver" class="hidden">
+            <h2>🎮 ИГРА ОКОНЧЕНА</h2>
+            <div id="finalScore" style="color:#ffd700;font-size:24px;margin:20px;"></div>
+            <button class="btn" onclick="restartGame()">Играть снова</button>
+            <button class="btn" onclick="exitToMenu()">Главное меню</button>
+            <div id="leaderboardGame" class="leaderboard"></div>
+        </div>
+    </div>
+
+    <script>
+        let ysdk, player;
+        let gameState = {
+            mode: null,
+            score: 0,
+            lives: 3,
+            timeLeft: 60,
+            character: null,
+            items: [],
+            obstacles: [],
+            keys: {},
+            paused: false,
+            gameLoop: null,
+            timerInterval: null,
+            spawnInterval: null,
+            lastActivityTime: Date.now(),
+            adUsage: { extraLife: 0, revive: 0 }
+        };
+
+        // Инициализация Yandex SDK
+        YaGames.init().then(sdk => {
+            ysdk = sdk;
+            return ysdk.getPlayer();
+        }).then(p => {
+            player = p;
+            loadLeaderboard();
+        }).catch(err => {
+            console.log('SDK Init Error:', err);
+        });
+
+        function startGame(mode) {
+            gameState.mode = mode;
+            gameState.score = 0;
+            gameState.lives = mode === 'endless' ? 3 : Infinity;
+            gameState.timeLeft = mode === 'classic' ? 60 : Infinity;
+            gameState.paused = false;
+            gameState.lastActivityTime = Date.now();
+            gameState.adUsage = { extraLife: 0, revive: 0 };
+            
+            document.getElementById('menu').classList.add('hidden');
+            document.getElementById('gameOver').classList.add('hidden');
+            document.getElementById('gameArea').classList.remove('hidden');
+            
+            initGame();
+            if (ysdk) ysdk.features.GameplayAPI?.start();
+        }
+
+        function initGame() {
+            const gameArea = document.getElementById('gameArea');
+            gameArea.innerHTML = '<div id="hud"><div id="score">Очки: 0</div><div id="timer"></div><div id="lives"></div></div>';
+            
+            gameState.character = document.createElement('div');
+            gameState.character.className = 'character';
+            gameState.character.textContent = '👾';
+            gameState.character.style.left = '50%';
+            gameState.character.style.top = '50%';
+            gameArea.appendChild(gameState.character);
+            
+            updateHUD();
+            
+            document.addEventListener('keydown', handleKeyDown);
+            document.addEventListener('keyup', handleKeyUp);
+            
+            gameState.gameLoop = setInterval(gameLoop, 16);
+            gameState.spawnInterval = setInterval(spawnItems, 2000);
+            
+            if (gameState.mode === 'classic') {
+                const startTime = Date.now();
+                gameState.timerInterval = setInterval(() => {
+                    const elapsed = Math.floor((Date.now() - startTime) / 1000);
+                    gameState.timeLeft = Math.max(0, 60 - elapsed);
+                    updateHUD();
+                    if (gameState.timeLeft <= 0) endGame();
+                }, 100);
+            }
+        }
+
+        function handleKeyDown(e) {
+            if (['w','a','s','d','W','A','S','D','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.key)) {
+                e.preventDefault();
+                gameState.keys[e.key.toLowerCase()] = true;
+                gameState.lastActivityTime = Date.now();
+            }
+            if (e.key === 'Escape' || e.key === 'p' || e.key === 'P') {
+                e.preventDefault();
+                togglePause();
+            }
+        }
+
+        function handleKeyUp(e) {
+            gameState.keys[e.key.toLowerCase()] = false;
+        }
+
+        function gameLoop() {
+            if (gameState.paused) return;
+            
+            // AFK check
+            if (Date.now() - gameState.lastActivityTime > 10000) {
+                pauseGame();
+                return;
+            }
+            
+            // Move character
+            const char = gameState.character;
+            let x = parseFloat(char.style.left) || 50;
+            let y = parseFloat(char.style.top) || 50;
+            const speed = 0.5;
+            
+            if (gameState.keys['w'] || gameState.keys['arrowup']) y -= speed;
+            if (gameState.keys['s'] || gameState.keys['arrowdown']) y += speed;
+            if (gameState.keys['a'] || gameState.keys['arrowleft']) x -= speed;
+            if (gameState.keys['d'] || gameState.keys['arrowright']) x += speed;
+            
+            x = Math.max(0, Math.min(95, x));
+            y = Math.max(0, Math.min(95, y));
+            
+            char.style.left = x + '%';
+            char.style.top = y + '%';
+            
+            checkCollisions();
+        }
+
+        function spawnItems() {
+            if (gameState.paused) return;
+            
+            const gameArea = document.getElementById('gameArea');
+            const spawnCount = gameState.mode === 'endless' ? Math.min(2, 1 + Math.floor(gameState.score / 50)) : 1;
+            
+            for (let i = 0; i < spawnCount; i++) {
+                const item = document.createElement('div');
+                item.className = 'item';
+                item.textContent = '💎';
+                let x, y, overlap;
+                do {
+                    x = Math.random() * 90;
+                    y = Math.random() * 90;
+                    overlap = checkSpawnOverlap(x, y);
+                } while (overlap);
+                
+                item.style.left = x + '%';
+                item.style.top = y + '%';
+                gameArea.appendChild(item);
+                gameState.items.push({el: item, time: Date.now()});
+                
+                setTimeout(() => {
+                    if (item.parentNode) {
+                        item.remove();
+                        gameState.items = gameState.items.filter(i => i.el !== item);
+                    }
+                }, 5000);
+            }
+            
+            if (gameState.mode === 'endless' && Math.random() < 0.4) {
+                const obstacle = document.createElement('div');
+                obstacle.className = 'obstacle';
+                obstacle.textContent = '🔥';
+                let x, y, overlap;
+                do {
+                    x = Math.random() * 90;
+                    y = Math.random() * 90;
+                    overlap = checkSpawnOverlap(x, y);
+                } while (overlap);
+                
+                obstacle.style.left = x + '%';
+                obstacle.style.top = y + '%';
+                gameArea.appendChild(obstacle);
+                gameState.obstacles.push({el: obstacle, time: Date.now()});
+                
+                setTimeout(() => {
+                    if (obstacle.parentNode) {
+                        obstacle.remove();
+                        gameState.obstacles = gameState.obstacles.filter(o => o.el !== obstacle);
+                    }
+                }, 3000);
+            }
+        }
+
+        function checkSpawnOverlap(x, y) {
+            const charX = parseFloat(gameState.character.style.left);
+            const charY = parseFloat(gameState.character.style.top);
+            if (Math.abs(x - charX) < 10 && Math.abs(y - charY) < 10) return true;
+            
+            for (let item of gameState.items) {
+                const ix = parseFloat(item.el.style.left);
+                const iy = parseFloat(item.el.style.top);
+                if (Math.abs(x - ix) < 8 && Math.abs(y - iy) < 8) return true;
+            }
+            
+            for (let obs of gameState.obstacles) {
+                const ox = parseFloat(obs.el.style.left);
+                const oy = parseFloat(obs.el.style.top);
+                if (Math.abs(x - ox) < 8 && Math.abs(y - oy) < 8) return true;
+            }
+            
+            return false;
+        }
+
+        function checkCollisions() {
+            const charX = parseFloat(gameState.character.style.left);
+            const charY = parseFloat(gameState.character.style.top);
+            
+            gameState.items = gameState.items.filter(item => {
+                const itemX = parseFloat(item.el.style.left);
+                const itemY = parseFloat(item.el.style.top);
+                if (Math.abs(charX - itemX) < 5 && Math.abs(charY - itemY) < 5) {
+                    item.el.remove();
+                    gameState.score += 10;
+                    updateHUD();
+                    return false;
+                }
+                return true;
+            });
+            
+            if (gameState.mode === 'endless') {
+                gameState.obstacles = gameState.obstacles.filter(obs => {
+                    const obsX = parseFloat(obs.el.style.left);
+                    const obsY = parseFloat(obs.el.style.top);
+                    if (Math.abs(charX - obsX) < 5 && Math.abs(charY - obsY) < 5) {
+                        obs.el.remove();
+                        gameState.lives--;
+                        updateHUD();
+                        if (gameState.lives <= 0) endGame();
+                        return false;
+                    }
+                    return true;
+                });
+            }
+        }
+
+        function updateHUD() {
+            document.getElementById('score').textContent = 'Очки: ' + gameState.score;
+            if (gameState.mode === 'classic') {
+                document.getElementById('timer').textContent = 'Время: ' + gameState.timeLeft + 's';
+            }
+            if (gameState.mode === 'endless') {
+                document.getElementById('lives').textContent = '❤️ ' + gameState.lives;
+            }
+        }
+
+        function togglePause() {
+            if (gameState.paused) resumeGame();
+            else pauseGame();
+        }
+
+        function pauseGame() {
+            gameState.paused = true;
+            document.getElementById('pause').classList.remove('hidden');
+            if (ysdk) ysdk.features.GameplayAPI?.stop();
+        }
+
+        function resumeGame() {
+            gameState.paused = false;
+            gameState.lastActivityTime = Date.now();
+            document.getElementById('pause').classList.add('hidden');
+            if (ysdk) ysdk.features.GameplayAPI?.start();
+        }
+
+        function endGame() {
+            clearInterval(gameState.gameLoop);
+            clearInterval(gameState.timerInterval);
+            clearInterval(gameState.spawnInterval);
